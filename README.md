@@ -1,4 +1,4 @@
-# 📚 Leitura Crente - Controle de Pedidos
+# 📚 Completude - Controle de Pedidos
 
 Sistema Full Stack desenvolvido para o teste prático de TI Interno da Plenitude.
 

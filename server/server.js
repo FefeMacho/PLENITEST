@@ -32,11 +32,11 @@ async function startServer() {
     app.listen(PORT, () => {
         console.log(`
         ##############################################
-        🚀 LEITURA CRENTE - BACKEND ONLINE
+        🚀 LEITURA CRENTE - BACKEND v2.0 ONLINE
         📡 Porta: ${PORT}
         📂 Uploads: /uploads
         🗄️ Banco: SQLite (pedidos.db)
-        🤖 IA de Rastreio: ATIVADA
+        🤖 IA de Rastreio: BUSCA POR NOME OU ID
         ##############################################
         `);
     });
@@ -46,7 +46,6 @@ async function startServer() {
 // ROTAS DE PRODUTOS (ESTOQUE)
 // ==========================================
 
-// Listar Produtos
 app.get('/api/produtos', async (req, res) => {
     try {
         const produtos = await db.all('SELECT * FROM produtos');
@@ -56,7 +55,6 @@ app.get('/api/produtos', async (req, res) => {
     }
 });
 
-// Cadastrar Produto
 app.post('/api/produtos', upload.single('foto'), async (req, res) => {
     const { nome, preco } = req.body;
     const imagem_url = req.file 
@@ -74,7 +72,6 @@ app.post('/api/produtos', upload.single('foto'), async (req, res) => {
     }
 });
 
-// Atualizar Preço
 app.put('/api/produtos/:id', async (req, res) => {
     const { id } = req.params;
     const { preco } = req.body;
@@ -86,7 +83,6 @@ app.put('/api/produtos/:id', async (req, res) => {
     }
 });
 
-// EXCLUIR PRODUTO
 app.delete('/api/produtos/:id', async (req, res) => {
     const { id } = req.params;
     try {
@@ -101,7 +97,7 @@ app.delete('/api/produtos/:id', async (req, res) => {
 // ROTAS DE PEDIDOS (CARRINHO E ADM)
 // ==========================================
 
-// Listar Pedidos (Com Detalhes)
+// Listar Pedidos (Painel ADM)
 app.get('/api/pedidos', async (req, res) => {
     try {
         const sql = `
@@ -119,22 +115,30 @@ app.get('/api/pedidos', async (req, res) => {
         const pedidos = await db.all(sql);
         res.json(pedidos);
     } catch (err) {
-        console.error("Erro no SQL:", err);
         res.status(500).json({ error: "Erro ao carregar pedidos" });
     }
 });
 
-// Fazer Pedido
+// FAZER PEDIDO (Com suporte a Quantidades e Protocolo ID)
 app.post('/api/pedidos', async (req, res) => {
-    const { cliente, produtos } = req.body;
+    const { cliente, email, telefone, produtos } = req.body;
+
     if (!cliente || !produtos || produtos.length === 0) {
-        return res.status(400).json({ error: "Dados incompletos" });
+        return res.status(400).json({ error: "Dados incompletos para processar o pedido" });
     }
 
     try {
-        const result = await db.run('INSERT INTO pedidos (cliente) VALUES (?)', [cliente]);
+        // Inicia Transação para garantir que não crie pedido sem itens
+        await db.run('BEGIN TRANSACTION');
+
+        // 1. Cria o pedido principal (O ID será gerado aqui)
+        const result = await db.run(
+            'INSERT INTO pedidos (cliente, status) VALUES (?, ?)', 
+            [cliente, 'pendente']
+        );
         const pedidoId = result.lastID;
 
+        // 2. Insere os itens com a quantidade correta vinda do carrinho
         for (const item of produtos) {
             await db.run(
                 'INSERT INTO itens_pedido (pedido_id, produto_nome, quantidade) VALUES (?, ?, ?)', 
@@ -142,30 +146,34 @@ app.post('/api/pedidos', async (req, res) => {
             );
         }
 
-        // Tenta enviar e-mail, se a função existir
+        await db.run('COMMIT');
+
+        // Tenta enviar e-mail de confirmação
         if (typeof enviarEmailPedido === 'function') {
             enviarEmailPedido(cliente, pedidoId, 'pendente');
         }
         
-        res.status(201).json({ id: pedidoId, message: "Pedido processado com sucesso!" });
+        // Retornamos o ID (Protocolo) para o Front exibir
+        res.status(201).json({ 
+            id: pedidoId, 
+            message: "Pedido processado com sucesso!",
+            protocolo: pedidoId 
+        });
+
     } catch (err) {
-        console.error(err);
-        res.status(500).json({ error: "Erro ao criar pedido" });
+        await db.run('ROLLBACK');
+        console.error("Erro no checkout:", err);
+        res.status(500).json({ error: "Erro interno ao criar pedido" });
     }
 });
 
-// Atualizar Status do Pedido
 app.put('/api/pedidos/:id/status', async (req, res) => {
     const { id } = req.params;
     const { novoStatus } = req.body;
 
     try {
         const pedido = await db.get('SELECT status, cliente FROM pedidos WHERE id = ?', [id]);
-        
         if (!pedido) return res.status(404).json({ error: "Pedido não encontrado" });
-        if (pedido.status === 'finalizado') {
-            return res.status(400).json({ error: "Regra de Negócio: Pedido finalizado não pode ser alterado!" });
-        }
         
         await db.run('UPDATE pedidos SET status = ? WHERE id = ?', [novoStatus, id]);
         
@@ -173,34 +181,33 @@ app.put('/api/pedidos/:id/status', async (req, res) => {
             enviarEmailPedido(pedido.cliente, id, novoStatus);
         }
         
-        res.json({ message: "Status atualizado com sucesso!" });
+        res.json({ message: "Status atualizado!" });
     } catch (err) {
         res.status(500).json({ error: "Erro ao atualizar status" });
     }
 });
 
 // ==========================================
-// ROTA DA IA (RASTREIO)
+// ROTA DA IA (RASTREIO POR NOME OU ID)
 // ==========================================
 
-// Buscar pedidos pelo nome do cliente (Like)
-app.get('/api/rastreio/:cliente', async (req, res) => {
-    const { cliente } = req.params;
+app.get('/api/rastreio/:busca', async (req, res) => {
+    const { busca } = req.params;
     try {
         const sql = `
-            SELECT p.*, GROUP_CONCAT(i.produto_nome, ', ') as itens
+            SELECT p.*, GROUP_CONCAT(i.produto_nome || ' (x' || i.quantidade || ')', ', ') as itens
             FROM pedidos p
             LEFT JOIN itens_pedido i ON p.id = i.pedido_id
-            WHERE p.cliente LIKE ?
+            WHERE p.cliente LIKE ? OR p.id = ?
             GROUP BY p.id
             ORDER BY p.data_criacao DESC
         `;
-        // O % antes e depois permite achar o nome mesmo se digitar incompleto
-        const pedidos = await db.all(sql, [`%${cliente}%`]);
+        // Procura por parte do nome OU pelo número exato do pedido
+        const pedidos = await db.all(sql, [`%${busca}%`, busca]);
         res.json(pedidos);
     } catch (err) {
-        console.error("Erro na rota da IA:", err);
-        res.status(500).json({ error: "Erro na consulta da IA" });
+        console.error("Erro na busca da IA:", err);
+        res.status(500).json({ error: "Erro na consulta de rastreio" });
     }
 });
 

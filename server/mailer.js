@@ -15,13 +15,13 @@ const transporter = nodemailer.createTransport({
 async function enviarEmailPedido(cliente, pedidoId, status) {
     try {
         const info = await transporter.sendMail({
-            from: '"Leitura Crente 📚" <contato@leituracrente.com>',
+            from: '"Completude 📚" <contato@leituracrente.com>',
             to: "cliente@exemplo.com", // No mundo real, aqui seria o e-mail do cliente
             subject: `Atualização do seu Pedido #${pedidoId}`,
-            text: `Olá ${cliente}, seu pedido na Leitura Crente agora está: ${status}!`,
+            text: `Olá ${cliente}, seu pedido na Completude agora está: ${status}!`,
             html: `
                 <div style="font-family: sans-serif; color: #333;">
-                    <h2 style="color: #2c3e50;">Leitura Crente - Livraria Cristã</h2>
+                    <h2 style="color: #2c3e50;">Completude - Livraria Cristã</h2>
                     <p>Olá <strong>${cliente}</strong>,</p>
                     <p>O status do seu pedido <strong>#${pedidoId}</strong> foi atualizado para:</p>
                     <div style="background: #f1f1f1; padding: 15px; border-radius: 5px; font-weight: bold; display: inline-block;">

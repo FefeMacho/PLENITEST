@@ -1,7 +1,7 @@
 {
   "name": "leitura-crente-server",
   "version": "1.0.0",
-  "description": "Backend para o controle de pedidos da Leitura Crente",
+  "description": "Backend para o controle de pedidos da Completude",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
