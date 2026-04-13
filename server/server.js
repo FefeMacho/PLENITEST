@@ -2,16 +2,23 @@ const express = require('express');
 const cors = require('cors');
 const multer = require('multer');
 const path = require('path');
+const fs = require('fs');
 const { setupDb } = require('./database');
 const { enviarEmailPedido } = require('./mailer');
 
 const app = express();
 const PORT = 3001;
 
-// --- CONFIGURAÇÃO DE UPLOAD ---
+// --- GARANTIR QUE A PASTA DE UPLOADS EXISTA ---
+const uploadDir = 'uploads/';
+if (!fs.existsSync(uploadDir)) {
+    fs.mkdirSync(uploadDir);
+}
+
+// --- CONFIGURAÇÃO DE UPLOAD (MULTER) ---
 const storage = multer.diskStorage({
     destination: (req, file, cb) => {
-        cb(null, 'uploads/');
+        cb(null, uploadDir);
     },
     filename: (req, file, cb) => {
         const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
@@ -29,14 +36,15 @@ let db;
 // --- INICIALIZAÇÃO DO SERVIDOR ---
 async function startServer() {
     db = await setupDb();
+    await db.run('ALTER TABLE pedidos ADD COLUMN cpf TEXT;');
     app.listen(PORT, () => {
         console.log(`
         ##############################################
-        🚀 LEITURA CRENTE - BACKEND v2.0 ONLINE
+        🚀 LEITURA CRENTE - BACKEND v2.1 ONLINE
         📡 Porta: ${PORT}
         📂 Uploads: /uploads
         🗄️ Banco: SQLite (pedidos.db)
-        🤖 IA de Rastreio: BUSCA POR NOME OU ID
+        🤖 IA de Rastreio: CPF OU ID HABILITADOS
         ##############################################
         `);
     });
@@ -62,9 +70,12 @@ app.post('/api/produtos', upload.single('foto'), async (req, res) => {
         : 'https://via.placeholder.com/400';
 
     try {
+        const precoNum = parseFloat(preco);
+        if (isNaN(precoNum)) return res.status(400).json({ error: "Preço inválido" });
+
         await db.run(
             'INSERT INTO produtos (nome, preco, imagem_url) VALUES (?, ?, ?)',
-            [nome, parseFloat(preco), imagem_url]
+            [nome, precoNum, imagem_url]
         );
         res.status(201).json({ message: "Produto cadastrado!" });
     } catch (err) {
@@ -97,48 +108,50 @@ app.delete('/api/produtos/:id', async (req, res) => {
 // ROTAS DE PEDIDOS (CARRINHO E ADM)
 // ==========================================
 
-// Listar Pedidos (Painel ADM)
+// Listar Pedidos (Painel ADM) - AJUSTADO COM COALESCE E CPF
 app.get('/api/pedidos', async (req, res) => {
     try {
         const sql = `
-            SELECT 
-                p.id, 
-                p.cliente, 
-                p.status, 
-                p.data_criacao,
-                GROUP_CONCAT(i.produto_nome || ' (x' || i.quantidade || ')', ', ') as itens_resumo
-            FROM pedidos p
-            LEFT JOIN itens_pedido i ON p.id = i.pedido_id
-            GROUP BY p.id
-            ORDER BY p.data_criacao DESC
-        `;
+    SELECT 
+        p.id, 
+        p.cliente, 
+        p.cpf,
+        p.status, 
+        p.data_criacao,
+        -- Troquei a vírgula por ' | ' para facilitar a leitura se o texto quebrar linha
+        COALESCE(GROUP_CONCAT(i.produto_nome || ' (x' || i.quantidade || ')', ' | '), 'Sem itens') as itens_resumo
+    FROM pedidos p
+    LEFT JOIN itens_pedido i ON p.id = i.pedido_id
+    GROUP BY p.id
+    ORDER BY p.data_criacao DESC
+`;
         const pedidos = await db.all(sql);
         res.json(pedidos);
     } catch (err) {
+        console.error(err);
         res.status(500).json({ error: "Erro ao carregar pedidos" });
     }
 });
 
-// FAZER PEDIDO (Com suporte a Quantidades e Protocolo ID)
+// FAZER PEDIDO (Ajustado para CPF)
 app.post('/api/pedidos', async (req, res) => {
-    const { cliente, email, telefone, produtos } = req.body;
+    const { cliente, cpf, produtos } = req.body;
 
-    if (!cliente || !produtos || produtos.length === 0) {
-        return res.status(400).json({ error: "Dados incompletos para processar o pedido" });
+    if (!cliente || !cpf || !produtos || produtos.length === 0) {
+        return res.status(400).json({ error: "Dados incompletos (Nome, CPF e Produtos são obrigatórios)" });
     }
 
     try {
-        // Inicia Transação para garantir que não crie pedido sem itens
         await db.run('BEGIN TRANSACTION');
 
-        // 1. Cria o pedido principal (O ID será gerado aqui)
+        // 1. Cria o pedido principal (Adicionado coluna cpf)
         const result = await db.run(
-            'INSERT INTO pedidos (cliente, status) VALUES (?, ?)', 
-            [cliente, 'pendente']
+            'INSERT INTO pedidos (cliente, cpf, status) VALUES (?, ?, ?)', 
+            [cliente, cpf, 'pendente']
         );
         const pedidoId = result.lastID;
 
-        // 2. Insere os itens com a quantidade correta vinda do carrinho
+        // 2. Insere os itens
         for (const item of produtos) {
             await db.run(
                 'INSERT INTO itens_pedido (pedido_id, produto_nome, quantidade) VALUES (?, ?, ?)', 
@@ -148,17 +161,12 @@ app.post('/api/pedidos', async (req, res) => {
 
         await db.run('COMMIT');
 
-        // Tenta enviar e-mail de confirmação
+        // Notificação por e-mail (opcional)
         if (typeof enviarEmailPedido === 'function') {
             enviarEmailPedido(cliente, pedidoId, 'pendente');
         }
         
-        // Retornamos o ID (Protocolo) para o Front exibir
-        res.status(201).json({ 
-            id: pedidoId, 
-            message: "Pedido processado com sucesso!",
-            protocolo: pedidoId 
-        });
+        res.status(201).json({ id: pedidoId, message: "Pedido processado com sucesso!" });
 
     } catch (err) {
         await db.run('ROLLBACK');
@@ -167,6 +175,7 @@ app.post('/api/pedidos', async (req, res) => {
     }
 });
 
+// ATUALIZAR STATUS (Com Regra de Imutabilidade)
 app.put('/api/pedidos/:id/status', async (req, res) => {
     const { id } = req.params;
     const { novoStatus } = req.body;
@@ -175,6 +184,11 @@ app.put('/api/pedidos/:id/status', async (req, res) => {
         const pedido = await db.get('SELECT status, cliente FROM pedidos WHERE id = ?', [id]);
         if (!pedido) return res.status(404).json({ error: "Pedido não encontrado" });
         
+        // Regra de Negócio: Finalizado é o estado final!
+        if (pedido.status === 'finalizado') {
+            return res.status(403).json({ error: "Pedidos finalizados não podem ser alterados." });
+        }
+
         await db.run('UPDATE pedidos SET status = ? WHERE id = ?', [novoStatus, id]);
         
         if (typeof enviarEmailPedido === 'function') {
@@ -188,22 +202,22 @@ app.put('/api/pedidos/:id/status', async (req, res) => {
 });
 
 // ==========================================
-// ROTA DA IA (RASTREIO POR NOME OU ID)
+// ROTA DA IA (RASTREIO POR CPF OU ID)
 // ==========================================
 
 app.get('/api/rastreio/:busca', async (req, res) => {
     const { busca } = req.params;
     try {
         const sql = `
-            SELECT p.*, GROUP_CONCAT(i.produto_nome || ' (x' || i.quantidade || ')', ', ') as itens
+            SELECT p.*, COALESCE(GROUP_CONCAT(i.produto_nome || ' (x' || i.quantidade || ')', ', '), 'Processando itens...') as itens
             FROM pedidos p
             LEFT JOIN itens_pedido i ON p.id = i.pedido_id
-            WHERE p.cliente LIKE ? OR p.id = ?
+            WHERE p.cpf = ? OR p.id = ? OR p.cliente LIKE ?
             GROUP BY p.id
             ORDER BY p.data_criacao DESC
         `;
-        // Procura por parte do nome OU pelo número exato do pedido
-        const pedidos = await db.all(sql, [`%${busca}%`, busca]);
+        // Busca exata por CPF ou ID, ou parcial por Nome
+        const pedidos = await db.all(sql, [busca, busca, `%${busca}%`]);
         res.json(pedidos);
     } catch (err) {
         console.error("Erro na busca da IA:", err);
@@ -212,4 +226,3 @@ app.get('/api/rastreio/:busca', async (req, res) => {
 });
 
 startServer();
-// atualiza ai git KKKKKK

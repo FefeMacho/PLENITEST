@@ -1,4 +1,4 @@
-# 📚 Completude - Controle de Pedidos
+# 📚 Completude - Site de compra
 
 Sistema Full Stack desenvolvido para o teste prático de TI Interno da Plenitude.
 
